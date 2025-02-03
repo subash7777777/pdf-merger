@@ -1,137 +1,96 @@
-import streamlit as st
-import pandas as pd
-from io import BytesIO
+import os
 import zipfile
-import datetime
-import pdfrw
+from PyPDF2 import PdfMerger
+import shutil
+import streamlit as st
 
-class PDFFormFiller:
-    def __init__(self):
-        self.ANNOT_KEY = '/Annots'
-        self.ANNOT_FIELD_KEY = '/T'
-        self.ANNOT_FORM_KEY = '/FT'
-        self.ANNOT_FORM_TEXT = '/Tx'
-        self.ANNOT_FORM_BUTTON = '/Btn'
-        self.SUBTYPE_KEY = '/Subtype'
-        self.WIDGET_SUBTYPE_KEY = '/Widget'
+def extract_zip_to_temp_folder(zip_path, temp_folder):
+    """Extract a zip file to a temporary folder."""
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall(temp_folder)
 
-    def upload_files(self):
-        uploaded_excel = st.file_uploader("Upload Excel File", type=["xlsx", "xls"])
-        if uploaded_excel:
-            try:
-                self.excel_data = pd.read_excel(uploaded_excel)
-                st.success(f"Excel file uploaded: {uploaded_excel.name}")
-            except Exception as e:
-                st.error(f"Error reading Excel file: {e}")
+def merge_pdfs_by_account(first_zip, second_zip, output_zip):
+    """Merge PDFs by matching account names and create a single zip file with merged PDFs."""
+    first_temp_folder = "first_temp"
+    second_temp_folder = "second_temp"
+    os.makedirs(first_temp_folder, exist_ok=True)
+    os.makedirs(second_temp_folder, exist_ok=True)
 
-        uploaded_pdf = st.file_uploader("Upload PDF Template", type="pdf")
-        if uploaded_pdf:
-            try:
-                self.pdf_template_bytes = uploaded_pdf.read()
-                self.pdf_template = pdfrw.PdfReader(BytesIO(self.pdf_template_bytes))
-                st.success(f"PDF template uploaded: {uploaded_pdf.name}")
-                self.print_pdf_fields()
-            except Exception as e:
-                st.error(f"Error reading PDF template: {e}")
+    try:
+        # Extract zip files
+        extract_zip_to_temp_folder(first_zip, first_temp_folder)
+        extract_zip_to_temp_folder(second_zip, second_temp_folder)
 
-    def print_pdf_fields(self):
-        if self.pdf_template:
-            fields = set()
-            for page in self.pdf_template.pages:
-                if page[self.ANNOT_KEY]:
-                    for annotation in page[self.ANNOT_KEY]:
-                        if annotation[self.ANNOT_FIELD_KEY]:
-                            if annotation[self.SUBTYPE_KEY] == self.WIDGET_SUBTYPE_KEY:
-                                key = annotation[self.ANNOT_FIELD_KEY][1:-1]
-                                fields.add(key)
-            st.write("PDF form fields found:")
-            st.write(", ".join(sorted(fields)))
+        # Get lists of PDFs from both folders
+        first_pdfs = {os.path.splitext(f)[0]: os.path.join(first_temp_folder, f) for f in os.listdir(first_temp_folder) if f.endswith('.pdf')}
+        second_pdfs = {os.path.splitext(f)[0]: os.path.join(second_temp_folder, f) for f in os.listdir(second_temp_folder) if f.endswith('.pdf')}
 
-            if self.excel_data is not None:
-                st.write("\nExcel columns found:")
-                st.write(", ".join(self.excel_data.columns))
+        # Create the output zip file
+        with zipfile.ZipFile(output_zip, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for account, first_pdf_path in first_pdfs.items():
+                if account in second_pdfs:
+                    second_pdf_path = second_pdfs[account]
+                    merger = PdfMerger()
 
-    def fill_pdf_form(self, row_data):
-        template = pdfrw.PdfReader(BytesIO(self.pdf_template_bytes))
-        for page in template.pages:
-            if page[self.ANNOT_KEY]:
-                for annotation in page[self.ANNOT_KEY]:
-                    if annotation[self.ANNOT_FIELD_KEY]:
-                        if annotation[self.SUBTYPE_KEY] == self.WIDGET_SUBTYPE_KEY:
-                            key = annotation[self.ANNOT_FIELD_KEY][1:-1]
-                            if key in row_data:
-                                field_value = str(row_data[key])
-                                if pd.isna(field_value) or field_value.lower() == 'nan':
-                                    field_value = ''
+                    # Merge the PDFs
+                    merger.append(first_pdf_path)
+                    merger.append(second_pdf_path)
 
-                                if annotation[self.ANNOT_FORM_KEY] == self.ANNOT_FORM_TEXT:
-                                    annotation.update(pdfrw.PdfDict(V=field_value, AP=field_value))
-                                elif annotation[self.ANNOT_FORM_KEY] == self.ANNOT_FORM_BUTTON:
-                                    annotation.update(pdfrw.PdfDict(V=pdfrw.PdfName(field_value), AS=pdfrw.PdfName(field_value)))
-                annotation.update(pdfrw.PdfDict(Ff=1))
-        template.Root.AcroForm.update(pdfrw.PdfDict(NeedAppearances=pdfrw.PdfObject('true')))
-        return template
+                    # Save the merged PDF
+                    merged_pdf_path = f"{account}_merged.pdf"
+                    merger.write(merged_pdf_path)
+                    merger.close()
 
-    def process_all_records(self):
-        if self.excel_data is None or self.pdf_template is None:
-            st.error("Please upload both Excel file and PDF template.")
-            return
+                    # Add to the zip file
+                    zipf.write(merged_pdf_path, arcname=os.path.basename(merged_pdf_path))
 
-        # Ensure the 'Account number' column exists in the Excel file
-        if 'Account number' not in self.excel_data.columns:
-            st.error("The Excel file must contain a column named 'Account number'.")
-            return
+                    # Remove the temporary merged file
+                    os.remove(merged_pdf_path)
 
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        zip_filename = f"filled_forms_{timestamp}.zip"
+        return output_zip
 
-        zip_buffer = BytesIO()
-        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            successful_count = 0
-            failed_count = 0
+    finally:
+        # Clean up temporary folders
+        shutil.rmtree(first_temp_folder)
+        shutil.rmtree(second_temp_folder)
 
-            for index, row in self.excel_data.iterrows():
-                try:
-                    # Use 'Account number' as the filename identifier
-                    account_number = row['Account number']
-                    if pd.isna(account_number):
-                        st.warning(f"Missing 'Account number' for row {index + 1}. Skipping.")
-                        failed_count += 1
-                        continue
+# Streamlit App
+st.title("PDF Merger App")
+st.write("Upload two zip files containing PDFs with matching account numbers. The app will merge the PDFs and return a zip file containing the results.")
 
-                    pdf_filename = f"{account_number}.pdf"
-                    filled_pdf = self.fill_pdf_form(row.to_dict())
-                    pdf_buffer = BytesIO()
-                    pdfrw.PdfWriter().write(pdf_buffer, filled_pdf)
-                    pdf_bytes = pdf_buffer.getvalue()
-                    zip_file.writestr(pdf_filename, pdf_bytes)
-                    successful_count += 1
-                    st.write(f"Processed record {index + 1}/{len(self.excel_data)}: {pdf_filename}")
-                except Exception as e:
-                    failed_count += 1
-                    st.error(f"Error processing record {index}: {str(e)}")
+# File upload
+first_zip_file = st.file_uploader("Upload the first zip file containing PDFs", type=["zip"])
+second_zip_file = st.file_uploader("Upload the second zip file containing PDFs", type=["zip"])
 
-        zip_buffer.seek(0)
-        zip_content = zip_buffer.getvalue()
+if first_zip_file and second_zip_file:
+    if st.button("Merge PDFs"):
+        # Save the uploaded files temporarily
+        first_zip_path = "first_uploaded.zip"
+        second_zip_path = "second_uploaded.zip"
+        
+        with open(first_zip_path, "wb") as f:
+            f.write(first_zip_file.read())
+        with open(second_zip_path, "wb") as f:
+            f.write(second_zip_file.read())
 
-        st.download_button(
-            label="Download Filled Forms",
-            data=zip_content,
-            file_name=zip_filename,
-            mime='application/zip'
-        )
+        # Output zip file name
+        output_zip_path = "merged_pdfs.zip"
 
-        st.write(f"\nProcessing complete!")
-        st.write(f"Successfully processed: {successful_count} records")
-        st.write(f"Failed to process: {failed_count} records")
+        # Merge PDFs
+        try:
+            merge_pdfs_by_account(first_zip_path, second_zip_path, output_zip_path)
+            st.success("PDFs have been merged successfully!")
 
-def main():
-    st.title("PDF Form Filler")
-    filler = PDFFormFiller()
-    filler.upload_files()
-
-    if st.button("Process All Records"):
-        filler.process_all_records()
-
-if __name__ == "__main__":
-    main()
+            # Provide download link
+            with open(output_zip_path, "rb") as f:
+                st.download_button(label="Download Merged Zip File", data=f, file_name="merged_pdfs.zip", mime="application/zip")
+        except Exception as e:
+            st.error(f"An error occurred: {e}")
+        finally:
+            # Cleanup temporary files
+            if os.path.exists(first_zip_path):
+                os.remove(first_zip_path)
+            if os.path.exists(second_zip_path):
+                os.remove(second_zip_path)
+            if os.path.exists(output_zip_path):
+                os.remove(output_zip_path)
