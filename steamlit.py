@@ -1,6 +1,6 @@
+from PyPDF2 import PdfReader, PdfWriter
 import os
 import zipfile
-from PyPDF2 import PdfMerger
 import shutil
 import streamlit as st
 
@@ -9,8 +9,8 @@ def extract_zip_to_temp_folder(zip_path, temp_folder):
     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
         zip_ref.extractall(temp_folder)
 
-def merge_pdfs_by_account(first_zip, second_zip, output_zip):
-    """Merge PDFs by matching account names and create a single zip file with merged PDFs."""
+def merge_pdfs_preserving_fields(first_zip, second_zip, output_zip):
+    """Merge PDFs by matching account names and preserving form fields."""
     first_temp_folder = "first_temp"
     second_temp_folder = "second_temp"
     os.makedirs(first_temp_folder, exist_ok=True)
@@ -35,22 +35,40 @@ def merge_pdfs_by_account(first_zip, second_zip, output_zip):
                     if os.path.getsize(first_pdf_path) == 0 or os.path.getsize(second_pdf_path) == 0:
                         st.warning(f"Skipping empty file for account: {account}")
                         continue
-                    
+
                     try:
-                        merger = PdfMerger()
-                        merger.append(first_pdf_path)
-                        merger.append(second_pdf_path)
+                        # Load both PDFs
+                        first_pdf = PdfReader(first_pdf_path)
+                        second_pdf = PdfReader(second_pdf_path)
+                        writer = PdfWriter()
+
+                        # Append pages from both PDFs while preserving form fields
+                        for page in first_pdf.pages:
+                            writer.add_page(page)
+                        for page in second_pdf.pages:
+                            writer.add_page(page)
+
+                        # Preserve form fields
+                        if first_pdf.get("/AcroForm"):
+                            writer._root_object.update({
+                                "/AcroForm": first_pdf.get("/AcroForm")
+                            })
+                        if second_pdf.get("/AcroForm"):
+                            writer._root_object.update({
+                                "/AcroForm": second_pdf.get("/AcroForm")
+                            })
 
                         # Save the merged PDF
                         merged_pdf_path = f"{account}.pdf"
-                        merger.write(merged_pdf_path)
-                        merger.close()
+                        with open(merged_pdf_path, "wb") as output_file:
+                            writer.write(output_file)
 
                         # Add to the zip file
                         zipf.write(merged_pdf_path, arcname=os.path.basename(merged_pdf_path))
 
                         # Remove the temporary merged file
                         os.remove(merged_pdf_path)
+
                     except Exception as e:
                         st.error(f"Error merging files for account {account}: {e}")
 
@@ -63,7 +81,7 @@ def merge_pdfs_by_account(first_zip, second_zip, output_zip):
 
 # Streamlit App
 st.title("PDF Merger App")
-st.write("Upload two zip files containing PDFs with matching account numbers. The app will merge the PDFs and return a zip file containing the results.")
+st.write("Upload two zip files containing PDFs with matching account numbers. The app will merge the PDFs while preserving form fields.")
 
 # File upload
 first_zip_file = st.file_uploader("Upload the first zip file containing PDFs", type=["zip"])
@@ -85,7 +103,7 @@ if first_zip_file and second_zip_file:
 
         # Merge PDFs
         try:
-            merge_pdfs_by_account(first_zip_path, second_zip_path, output_zip_path)
+            merge_pdfs_preserving_fields(first_zip_path, second_zip_path, output_zip_path)
             st.success("PDFs have been merged successfully!")
 
             # Provide download link
