@@ -1,6 +1,7 @@
 import os
 import zipfile
 from PyPDF2 import PdfReader, PdfWriter, PdfMerger
+from PyPDF2.generic import IndirectObject
 import shutil
 import streamlit as st
 
@@ -17,15 +18,52 @@ def preserve_fields_and_merge_pdfs(first_pdf_path, second_pdf_path, output_pdf_p
         # Read the first PDF
         first_pdf = PdfReader(first_pdf_path)
         first_fields = {}
+        
+        for field in first_pdf.pages[0].get('/Annots', []):
+            if isinstance(field, IndirectObject):
+                field = field.get_object()  # Dereference IndirectObject
+            if field.get('/T') and field.get('/V'):
+                first_fields[field.get('/T')] = field.get('/V')
 
-        # Extract fields from the first PDF
-        for page in first_pdf.pages:
+        # Read the second PDF
+        second_pdf = PdfReader(second_pdf_path)
+        second_fields = {}
+        
+        for field in second_pdf.pages[0].get('/Annots', []):
+            if isinstance(field, IndirectObject):
+                field = field.get_object()  # Dereference IndirectObject
+            if field.get('/T') and field.get('/V'):
+                second_fields[field.get('/T')] = field.get('/V')
+
+        # Merge PDFs
+        merger = PdfMerger()
+        merger.append(first_pdf_path)
+        merger.append(second_pdf_path)
+        merger.write(output_pdf_path)
+        merger.close()
+
+        # Reload merged PDF and reinsert form fields
+        merged_pdf = PdfReader(output_pdf_path)
+        writer = PdfWriter()
+
+        for page in merged_pdf.pages:
             annotations = page.get('/Annots', [])
-            for annotation in annotations:
-                if isinstance(annotation, IndirectObject):
-                    annotation = annotation.get_object()  # Dereference IndirectObject
-                if annotation.get('/T') and annotation.get('/V'):
-                    first_fields[annotation.get('/T')] = annotation.get('/V')
+            for field_name, value in {**first_fields, **second_fields}.items():
+                for annotation in annotations:
+                    if isinstance(annotation, IndirectObject):
+                        annotation = annotation.get_object()  # Dereference IndirectObject
+                    if annotation.get('/T') == field_name:
+                        annotation.update({'/V': value})
+            writer.add_page(page)
+
+        # Save the updated PDF
+        with open(output_pdf_path, "wb") as f:
+            writer.write(f)
+
+        return output_pdf_path
+
+    except Exception as e:
+        raise RuntimeError(f"Error preserving fields while merging: {e}")
 
         # Read the second PDF
         second_pdf = PdfReader(second_pdf_path)
