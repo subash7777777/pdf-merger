@@ -1,6 +1,6 @@
 import os
 import zipfile
-from PyPDF2 import PdfMerger, PdfReader, PdfWriter
+from PyPDF2 import PdfReader, PdfWriter, PdfMerger
 import shutil
 import streamlit as st
 
@@ -17,18 +17,28 @@ def preserve_fields_and_merge_pdfs(first_pdf_path, second_pdf_path, output_pdf_p
         # Read the first PDF
         first_pdf = PdfReader(first_pdf_path)
         first_fields = {}
-        for field in first_pdf.pages[0].get('/Annots', []):
-            field_obj = field.get_object()
-            if field_obj.get('/T') and field_obj.get('/V'):
-                first_fields[field_obj.get('/T')] = field_obj.get('/V')
+
+        # Extract fields from the first PDF
+        for page in first_pdf.pages:
+            annotations = page.get('/Annots', [])
+            for annotation in annotations:
+                if isinstance(annotation, IndirectObject):
+                    annotation = annotation.get_object()  # Dereference IndirectObject
+                if annotation.get('/T') and annotation.get('/V'):
+                    first_fields[annotation.get('/T')] = annotation.get('/V')
 
         # Read the second PDF
         second_pdf = PdfReader(second_pdf_path)
         second_fields = {}
-        for field in second_pdf.pages[0].get('/Annots', []):
-            field_obj = field.get_object()
-            if field_obj.get('/T') and field_obj.get('/V'):
-                second_fields[field_obj.get('/T')] = field_obj.get('/V')
+
+        # Extract fields from the second PDF
+        for page in second_pdf.pages:
+            annotations = page.get('/Annots', [])
+            for annotation in annotations:
+                if isinstance(annotation, IndirectObject):
+                    annotation = annotation.get_object()  # Dereference IndirectObject
+                if annotation.get('/T') and annotation.get('/V'):
+                    second_fields[annotation.get('/T')] = annotation.get('/V')
 
         # Merge PDFs
         merger = PdfMerger()
@@ -42,15 +52,15 @@ def preserve_fields_and_merge_pdfs(first_pdf_path, second_pdf_path, output_pdf_p
         writer = PdfWriter()
 
         for page in merged_pdf.pages:
-            for field_name, value in {**first_fields, **second_fields}.items():
-                # Reinsert the field values into the merged PDF
-                annotations = page.get('/Annots', [])
-                for annotation in annotations:
-                    field_obj = annotation.get_object()
-                    if field_obj.get('/T') == field_name:
-                        field_obj.update({
-                            '/V': value
-                        })
+            annotations = page.get('/Annots', [])
+            for annotation in annotations:
+                if isinstance(annotation, IndirectObject):
+                    annotation = annotation.get_object()  # Dereference IndirectObject
+                field_name = annotation.get('/T')
+                if field_name in first_fields:
+                    annotation.update({'/V': first_fields[field_name]})
+                elif field_name in second_fields:
+                    annotation.update({'/V': second_fields[field_name]})
             writer.add_page(page)
 
         # Save the updated PDF
@@ -88,9 +98,9 @@ def merge_pdfs_by_account(first_zip, second_zip, output_zip):
                     if os.path.getsize(first_pdf_path) == 0 or os.path.getsize(second_pdf_path) == 0:
                         st.warning(f"Skipping empty file for account: {account}")
                         continue
-                    
+
                     try:
-                        # Preserve fields and merge PDFs
+                        # Define merged output file name
                         merged_pdf_path = f"{account}.pdf"
                         preserve_fields_and_merge_pdfs(first_pdf_path, second_pdf_path, merged_pdf_path)
 
@@ -149,4 +159,3 @@ if first_zip_file and second_zip_file:
                 os.remove(second_zip_path)
             if os.path.exists(output_zip_path):
                 os.remove(output_zip_path)
-
