@@ -1,6 +1,6 @@
 import os
 import zipfile
-from PyPDF2 import PdfMerger
+from PyPDF2 import PdfMerger, PdfReader, PdfWriter
 import shutil
 import streamlit as st
 
@@ -8,6 +8,59 @@ def extract_zip_to_temp_folder(zip_path, temp_folder):
     """Extract a zip file to a temporary folder."""
     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
         zip_ref.extractall(temp_folder)
+
+def preserve_fields_and_merge_pdfs(first_pdf_path, second_pdf_path, output_pdf_path):
+    """
+    Merge two PDFs while preserving specific fields.
+    """
+    try:
+        # Read the first PDF
+        first_pdf = PdfReader(first_pdf_path)
+        first_fields = {}
+        for field in first_pdf.pages[0].get('/Annots', []):
+            field_obj = field.get_object()
+            if field_obj.get('/T') and field_obj.get('/V'):
+                first_fields[field_obj.get('/T')] = field_obj.get('/V')
+
+        # Read the second PDF
+        second_pdf = PdfReader(second_pdf_path)
+        second_fields = {}
+        for field in second_pdf.pages[0].get('/Annots', []):
+            field_obj = field.get_object()
+            if field_obj.get('/T') and field_obj.get('/V'):
+                second_fields[field_obj.get('/T')] = field_obj.get('/V')
+
+        # Merge PDFs
+        merger = PdfMerger()
+        merger.append(first_pdf_path)
+        merger.append(second_pdf_path)
+        merger.write(output_pdf_path)
+        merger.close()
+
+        # Reload merged PDF and reinsert form fields
+        merged_pdf = PdfReader(output_pdf_path)
+        writer = PdfWriter()
+
+        for page in merged_pdf.pages:
+            for field_name, value in {**first_fields, **second_fields}.items():
+                # Reinsert the field values into the merged PDF
+                annotations = page.get('/Annots', [])
+                for annotation in annotations:
+                    field_obj = annotation.get_object()
+                    if field_obj.get('/T') == field_name:
+                        field_obj.update({
+                            '/V': value
+                        })
+            writer.add_page(page)
+
+        # Save the updated PDF
+        with open(output_pdf_path, "wb") as f:
+            writer.write(f)
+
+        return output_pdf_path
+
+    except Exception as e:
+        raise RuntimeError(f"Error preserving fields while merging: {e}")
 
 def merge_pdfs_by_account(first_zip, second_zip, output_zip):
     """Merge PDFs by matching account names and create a single zip file with merged PDFs."""
@@ -30,29 +83,31 @@ def merge_pdfs_by_account(first_zip, second_zip, output_zip):
             for account, first_pdf_path in first_pdfs.items():
                 if account in second_pdfs:
                     second_pdf_path = second_pdfs[account]
-                    merger = PdfMerger()
 
-                    # Merge the PDFs
-                    merger.append(first_pdf_path)
-                    merger.append(second_pdf_path)
+                    # Validate PDFs
+                    if os.path.getsize(first_pdf_path) == 0 or os.path.getsize(second_pdf_path) == 0:
+                        st.warning(f"Skipping empty file for account: {account}")
+                        continue
+                    
+                    try:
+                        # Preserve fields and merge PDFs
+                        merged_pdf_path = f"{account}.pdf"
+                        preserve_fields_and_merge_pdfs(first_pdf_path, second_pdf_path, merged_pdf_path)
 
-                    # Save the merged PDF
-                    merged_pdf_path = f"{account}.pdf"
-                    merger.write(merged_pdf_path)
-                    merger.close()
+                        # Add to the zip file
+                        zipf.write(merged_pdf_path, arcname=os.path.basename(merged_pdf_path))
 
-                    # Add to the zip file
-                    zipf.write(merged_pdf_path, arcname=os.path.basename(merged_pdf_path))
-
-                    # Remove the temporary merged file
-                    os.remove(merged_pdf_path)
+                        # Remove the temporary merged file
+                        os.remove(merged_pdf_path)
+                    except Exception as e:
+                        st.error(f"Error merging files for account {account}: {e}")
 
         return output_zip
 
     finally:
         # Clean up temporary folders
-        shutil.rmtree(first_temp_folder)
-        shutil.rmtree(second_temp_folder)
+        shutil.rmtree(first_temp_folder, ignore_errors=True)
+        shutil.rmtree(second_temp_folder, ignore_errors=True)
 
 # Streamlit App
 st.title("PDF Merger App")
@@ -94,3 +149,4 @@ if first_zip_file and second_zip_file:
                 os.remove(second_zip_path)
             if os.path.exists(output_zip_path):
                 os.remove(output_zip_path)
+
