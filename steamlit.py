@@ -37,7 +37,7 @@ def merge_pdfs_by_account(first_zip, second_zip, output_zip):
                     merger.append(second_pdf_path)
 
                     # Save the merged PDF
-                    merged_pdf_path = f"{account}_merged.pdf"
+                    merged_pdf_path = f"{account}.pdf"
                     merger.write(merged_pdf_path)
                     merger.close()
 
