@@ -30,29 +30,36 @@ def merge_pdfs_by_account(first_zip, second_zip, output_zip):
             for account, first_pdf_path in first_pdfs.items():
                 if account in second_pdfs:
                     second_pdf_path = second_pdfs[account]
-                    merger = PdfMerger()
 
-                    # Merge the PDFs
-                    merger.append(first_pdf_path)
-                    merger.append(second_pdf_path)
+                    # Validate PDFs
+                    if os.path.getsize(first_pdf_path) == 0 or os.path.getsize(second_pdf_path) == 0:
+                        st.warning(f"Skipping empty file for account: {account}")
+                        continue
+                    
+                    try:
+                        merger = PdfMerger()
+                        merger.append(first_pdf_path)
+                        merger.append(second_pdf_path)
 
-                    # Save the merged PDF
-                    merged_pdf_path = f"{account}.pdf"
-                    merger.write(merged_pdf_path)
-                    merger.close()
+                        # Save the merged PDF
+                        merged_pdf_path = f"{account}.pdf"
+                        merger.write(merged_pdf_path)
+                        merger.close()
 
-                    # Add to the zip file
-                    zipf.write(merged_pdf_path, arcname=os.path.basename(merged_pdf_path))
+                        # Add to the zip file
+                        zipf.write(merged_pdf_path, arcname=os.path.basename(merged_pdf_path))
 
-                    # Remove the temporary merged file
-                    os.remove(merged_pdf_path)
+                        # Remove the temporary merged file
+                        os.remove(merged_pdf_path)
+                    except Exception as e:
+                        st.error(f"Error merging files for account {account}: {e}")
 
         return output_zip
 
     finally:
         # Clean up temporary folders
-        shutil.rmtree(first_temp_folder)
-        shutil.rmtree(second_temp_folder)
+        shutil.rmtree(first_temp_folder, ignore_errors=True)
+        shutil.rmtree(second_temp_folder, ignore_errors=True)
 
 # Streamlit App
 st.title("PDF Merger App")
