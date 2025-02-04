@@ -6,60 +6,54 @@ import shutil
 import streamlit as st
 
 def extract_zip_to_temp_folder(zip_path, temp_folder):
-    """Extract a zip file to a temporary folder."""
     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
         zip_ref.extractall(temp_folder)
 
+def get_field_properties(annotation):
+    """Extract field properties safely from annotation."""
+    if isinstance(annotation, IndirectObject):
+        annotation = annotation.get_object()
+    
+    return {
+        '/T': annotation.get('/T'),
+        '/V': annotation.get('/V'),
+        '/FT': annotation.get('/FT'),
+        '/Ff': annotation.get('/Ff'),
+        '/AP': annotation.get('/AP'),
+        '/AS': annotation.get('/AS'),
+        '/DA': annotation.get('/DA'),
+        '/F': annotation.get('/F'),
+        '/Q': annotation.get('/Q'),
+        '/Rect': annotation.get('/Rect')
+    }
+
 def preserve_fields_and_merge_pdfs(first_pdf_path, second_pdf_path, output_pdf_path):
-    """
-    Merge two PDFs while preserving all field properties and values.
-    """
     try:
         # Read the PDFs
         first_pdf = PdfReader(first_pdf_path)
         second_pdf = PdfReader(second_pdf_path)
         
-        # Store complete field definitions from first PDF
+        # Store complete field definitions
         first_fields = {}
-        for field in first_pdf.pages[0].get('/Annots', []):
-            if isinstance(field, IndirectObject):
-                field = field.get_object()
-            if field.get('/T'):
-                # Store complete field properties
-                first_fields[field.get('/T')] = {
-                    '/T': field.get('/T'),
-                    '/V': field.get('/V'),
-                    '/FT': field.get('/FT'),
-                    '/Ff': field.get('/Ff'),
-                    '/AP': field.get('/AP'),
-                    '/AS': field.get('/AS'),
-                    '/DA': field.get('/DA'),  # Default Appearance
-                    '/F': field.get('/F'),    # Flags
-                    '/Q': field.get('/Q'),    # Quadding (alignment)
-                    '/Rect': field.get('/Rect')  # Position and size
-                }
-
-        # Store complete field definitions from second PDF
         second_fields = {}
-        for field in second_pdf.pages[0].get('/Annots', []):
-            if isinstance(field, IndirectObject):
-                field = field.get_object()
-            if field.get('/T'):
-                # Store complete field properties
-                second_fields[field.get('/T')] = {
-                    '/T': field.get('/T'),
-                    '/V': field.get('/V'),
-                    '/FT': field.get('/FT'),
-                    '/Ff': field.get('/Ff'),
-                    '/AP': field.get('/AP'),
-                    '/AS': field.get('/AS'),
-                    '/DA': field.get('/DA'),
-                    '/F': field.get('/F'),
-                    '/Q': field.get('/Q'),
-                    '/Rect': field.get('/Rect')
-                }
 
-        # Log field information for debugging
+        # Extract fields from first PDF
+        if first_pdf.pages[0].get('/Annots'):
+            for annot in first_pdf.pages[0]['/Annots']:
+                if isinstance(annot, IndirectObject):
+                    annot = annot.get_object()
+                if annot.get('/T'):
+                    first_fields[annot['/T']] = get_field_properties(annot)
+
+        # Extract fields from second PDF
+        if second_pdf.pages[0].get('/Annots'):
+            for annot in second_pdf.pages[0]['/Annots']:
+                if isinstance(annot, IndirectObject):
+                    annot = annot.get_object()
+                if annot.get('/T'):
+                    second_fields[annot['/T']] = get_field_properties(annot)
+
+        # Log field information
         st.write(f"Fields found in first PDF: {list(first_fields.keys())}")
         st.write(f"Fields found in second PDF: {list(second_fields.keys())}")
 
@@ -76,37 +70,36 @@ def preserve_fields_and_merge_pdfs(first_pdf_path, second_pdf_path, output_pdf_p
 
         # Process each page
         for page_num, page in enumerate(merged_pdf.pages):
-            annotations = page.get('/Annots', [])
-            for annotation in annotations:
-                if isinstance(annotation, IndirectObject):
-                    annotation = annotation.get_object()
-                field_name = annotation.get('/T')
-                
-                # Update fields based on which PDF they came from
-                if page_num == 0 and field_name in first_fields:
-                    field_props = first_fields[field_name]
-                    # Update all field properties
-                    for key, value in field_props.items():
-                        if value is not None:
-                            annotation[key] = value
-                elif page_num == 1 and field_name in second_fields:
-                    field_props = second_fields[field_name]
-                    # Update all field properties
-                    for key, value in field_props.items():
-                        if value is not None:
-                            annotation[key] = value
+            if page.get('/Annots'):
+                annotations = page['/Annots']
+                for i, annot in enumerate(annotations):
+                    if isinstance(annot, IndirectObject):
+                        annot = annot.get_object()
+                    
+                    field_name = annot.get('/T')
+                    if page_num == 0 and field_name in first_fields:
+                        field_props = first_fields[field_name]
+                        for key, value in field_props.items():
+                            if value is not None:
+                                annot[key] = value
+                    elif page_num == 1 and field_name in second_fields:
+                        field_props = second_fields[field_name]
+                        for key, value in field_props.items():
+                            if value is not None:
+                                annot[key] = value
 
-                # Ensure field is editable
-                if annotation.get('/Ff') is None:
-                    annotation['/Ff'] = 0  # Set default flags if none exist
+                    # Ensure field is editable
+                    if annot.get('/Ff') is None:
+                        annot['/Ff'] = 0
 
             writer.add_page(page)
 
-        # Set form properties in the writer
-        writer._root_object.update({
-            '/AcroForm': merged_pdf.get_form_text_fields(),
-            '/NeedAppearances': True
-        })
+        # Ensure form fields are preserved
+        if merged_pdf.get_form_text_fields():
+            writer._root_object.update({
+                '/AcroForm': merged_pdf.get_form_text_fields(),
+                '/NeedAppearances': True
+            })
 
         # Save the updated PDF
         with open(output_pdf_path, "wb") as f:
@@ -115,11 +108,10 @@ def preserve_fields_and_merge_pdfs(first_pdf_path, second_pdf_path, output_pdf_p
         return output_pdf_path
 
     except Exception as e:
-        st.error(f"Error preserving fields while merging: {str(e)}")
+        st.error(f"Error details: {str(e)}")
         raise RuntimeError(f"Error preserving fields while merging: {e}")
 
 def merge_pdfs_by_account(first_zip, second_zip, output_zip):
-    """Merge PDFs by matching account names and create a single zip file with merged PDFs."""
     first_temp_folder = "first_temp"
     second_temp_folder = "second_temp"
     os.makedirs(first_temp_folder, exist_ok=True)
@@ -185,13 +177,11 @@ def main():
     st.title("PDF Merger App")
     st.write("Upload two zip files containing PDFs with matching account numbers. The app will merge the PDFs and return a zip file containing the results.")
 
-    # File upload
     first_zip_file = st.file_uploader("Upload the first zip file containing PDFs", type=["zip"])
     second_zip_file = st.file_uploader("Upload the second zip file containing PDFs", type=["zip"])
 
     if first_zip_file and second_zip_file:
         if st.button("Merge PDFs"):
-            # Save the uploaded files temporarily
             first_zip_path = "first_uploaded.zip"
             second_zip_path = "second_uploaded.zip"
             
@@ -201,15 +191,12 @@ def main():
                 with open(second_zip_path, "wb") as f:
                     f.write(second_zip_file.read())
 
-                # Output zip file name
                 output_zip_path = "merged_pdfs.zip"
 
-                # Merge PDFs
                 try:
                     merge_pdfs_by_account(first_zip_path, second_zip_path, output_zip_path)
                     st.success("PDFs have been merged successfully!")
 
-                    # Provide download link
                     with open(output_zip_path, "rb") as f:
                         st.download_button(
                             label="Download Merged Zip File",
