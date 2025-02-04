@@ -6,6 +6,7 @@ import shutil
 import streamlit as st
 
 def extract_zip_to_temp_folder(zip_path, temp_folder):
+    """Extract a zip file to a temporary folder."""
     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
         zip_ref.extractall(temp_folder)
 
@@ -14,8 +15,13 @@ def get_field_properties(annotation):
     if isinstance(annotation, IndirectObject):
         annotation = annotation.get_object()
     
+    # Convert field name to PdfObject if it isn't already
+    field_name = annotation.get('/T')
+    if field_name and not isinstance(field_name, IndirectObject):
+        field_name = str(field_name)
+
     return {
-        '/T': annotation.get('/T'),
+        '/T': field_name,
         '/V': annotation.get('/V'),
         '/FT': annotation.get('/FT'),
         '/Ff': annotation.get('/Ff'),
@@ -27,35 +33,65 @@ def get_field_properties(annotation):
         '/Rect': annotation.get('/Rect')
     }
 
+def extract_fields_from_pdf(pdf, debug=False):
+    """Extract all fields from a PDF with better detection."""
+    fields = {}
+    
+    # Try multiple methods to find fields
+    for page in pdf.pages:
+        # Method 1: Direct annotations
+        if page.get('/Annots'):
+            for annot in page['/Annots']:
+                if isinstance(annot, IndirectObject):
+                    annot = annot.get_object()
+                if annot.get('/T'):
+                    field_name = annot['/T']
+                    if isinstance(field_name, IndirectObject):
+                        field_name = field_name.get_object()
+                    field_name = str(field_name)
+                    fields[field_name] = get_field_properties(annot)
+                    if debug:
+                        st.write(f"Found field: {field_name}")
+                        st.write(f"Properties: {fields[field_name]}")
+        
+        # Method 2: AcroForm fields
+        if pdf.get_form_text_fields():
+            form_fields = pdf.get_form_text_fields()
+            for field_name, value in form_fields.items():
+                if field_name not in fields:
+                    fields[field_name] = {'/T': field_name, '/V': value}
+                    if debug:
+                        st.write(f"Found AcroForm field: {field_name}")
+
+    return fields
+
 def preserve_fields_and_merge_pdfs(first_pdf_path, second_pdf_path, output_pdf_path):
+    """Merge two PDFs while preserving all form fields and their values."""
     try:
         # Read the PDFs
         first_pdf = PdfReader(first_pdf_path)
         second_pdf = PdfReader(second_pdf_path)
-        
-        # Store complete field definitions
-        first_fields = {}
-        second_fields = {}
 
-        # Extract fields from first PDF
-        if first_pdf.pages[0].get('/Annots'):
-            for annot in first_pdf.pages[0]['/Annots']:
-                if isinstance(annot, IndirectObject):
-                    annot = annot.get_object()
-                if annot.get('/T'):
-                    first_fields[annot['/T']] = get_field_properties(annot)
+        # Extract fields with debug info
+        st.write("Analyzing first PDF fields...")
+        first_fields = extract_fields_from_pdf(first_pdf, debug=True)
+        st.write("\nAnalyzing second PDF fields...")
+        second_fields = extract_fields_from_pdf(second_pdf, debug=True)
 
-        # Extract fields from second PDF
-        if second_pdf.pages[0].get('/Annots'):
-            for annot in second_pdf.pages[0]['/Annots']:
-                if isinstance(annot, IndirectObject):
-                    annot = annot.get_object()
-                if annot.get('/T'):
-                    second_fields[annot['/T']] = get_field_properties(annot)
+        # Special handling for problematic fields
+        problematic_fields = {
+            "Names and status of applicant if other than assessed owner": "Names_and_status",
+            "Telephone No": "TelephoneNo",
+            "Names_and_status_of_applicant": "Names and status of applicant if other than assessed owner",
+            "Telephone_Number": "Telephone No"
+        }
 
-        # Log field information
-        st.write(f"Fields found in first PDF: {list(first_fields.keys())}")
-        st.write(f"Fields found in second PDF: {list(second_fields.keys())}")
+        # Check for alternative field names
+        for display_name, internal_name in problematic_fields.items():
+            if internal_name in first_fields:
+                st.write(f"Found problematic field under internal name: {internal_name}")
+            if display_name in first_fields:
+                st.write(f"Found problematic field under display name: {display_name}")
 
         # Merge PDFs
         merger = PdfMerger()
@@ -68,6 +104,11 @@ def preserve_fields_and_merge_pdfs(first_pdf_path, second_pdf_path, output_pdf_p
         merged_pdf = PdfReader(output_pdf_path)
         writer = PdfWriter()
 
+        # Dictionary to store all field values
+        all_fields = {}
+        all_fields.update(first_fields)
+        all_fields.update(second_fields)
+
         # Process each page
         for page_num, page in enumerate(merged_pdf.pages):
             if page.get('/Annots'):
@@ -77,16 +118,30 @@ def preserve_fields_and_merge_pdfs(first_pdf_path, second_pdf_path, output_pdf_p
                         annot = annot.get_object()
                     
                     field_name = annot.get('/T')
-                    if page_num == 0 and field_name in first_fields:
-                        field_props = first_fields[field_name]
-                        for key, value in field_props.items():
-                            if value is not None:
-                                annot[key] = value
-                    elif page_num == 1 and field_name in second_fields:
-                        field_props = second_fields[field_name]
-                        for key, value in field_props.items():
-                            if value is not None:
-                                annot[key] = value
+                    if isinstance(field_name, IndirectObject):
+                        field_name = field_name.get_object()
+                    field_name = str(field_name)
+
+                    # Check both original and alternative field names
+                    field_value = None
+                    if field_name in all_fields:
+                        field_props = all_fields[field_name]
+                    elif field_name in problematic_fields:
+                        alt_name = problematic_fields[field_name]
+                        if alt_name in all_fields:
+                            field_props = all_fields[alt_name]
+                    elif field_name in [v for v in problematic_fields.values()]:
+                        # Check reverse mapping
+                        original_name = [k for k, v in problematic_fields.items() if v == field_name][0]
+                        if original_name in all_fields:
+                            field_props = all_fields[original_name]
+                    else:
+                        continue
+
+                    # Apply field properties
+                    for key, value in field_props.items():
+                        if value is not None:
+                            annot[key] = value
 
                     # Ensure field is editable
                     if annot.get('/Ff') is None:
@@ -95,11 +150,10 @@ def preserve_fields_and_merge_pdfs(first_pdf_path, second_pdf_path, output_pdf_p
             writer.add_page(page)
 
         # Ensure form fields are preserved
-        if merged_pdf.get_form_text_fields():
-            writer._root_object.update({
-                '/AcroForm': merged_pdf.get_form_text_fields(),
-                '/NeedAppearances': True
-            })
+        writer._root_object.update({
+            '/AcroForm': merged_pdf.get_form_text_fields(),
+            '/NeedAppearances': True
+        })
 
         # Save the updated PDF
         with open(output_pdf_path, "wb") as f:
@@ -112,6 +166,7 @@ def preserve_fields_and_merge_pdfs(first_pdf_path, second_pdf_path, output_pdf_p
         raise RuntimeError(f"Error preserving fields while merging: {e}")
 
 def merge_pdfs_by_account(first_zip, second_zip, output_zip):
+    """Merge PDFs by matching account numbers from two zip files."""
     first_temp_folder = "first_temp"
     second_temp_folder = "second_temp"
     os.makedirs(first_temp_folder, exist_ok=True)
@@ -172,16 +227,18 @@ def merge_pdfs_by_account(first_zip, second_zip, output_zip):
         shutil.rmtree(first_temp_folder, ignore_errors=True)
         shutil.rmtree(second_temp_folder, ignore_errors=True)
 
-# Streamlit App
 def main():
+    """Main Streamlit application."""
     st.title("PDF Merger App")
     st.write("Upload two zip files containing PDFs with matching account numbers. The app will merge the PDFs and return a zip file containing the results.")
 
+    # File upload
     first_zip_file = st.file_uploader("Upload the first zip file containing PDFs", type=["zip"])
     second_zip_file = st.file_uploader("Upload the second zip file containing PDFs", type=["zip"])
 
     if first_zip_file and second_zip_file:
         if st.button("Merge PDFs"):
+            # Save the uploaded files temporarily
             first_zip_path = "first_uploaded.zip"
             second_zip_path = "second_uploaded.zip"
             
@@ -191,12 +248,14 @@ def main():
                 with open(second_zip_path, "wb") as f:
                     f.write(second_zip_file.read())
 
+                # Output zip file name
                 output_zip_path = "merged_pdfs.zip"
 
                 try:
                     merge_pdfs_by_account(first_zip_path, second_zip_path, output_zip_path)
                     st.success("PDFs have been merged successfully!")
 
+                    # Provide download link
                     with open(output_zip_path, "rb") as f:
                         st.download_button(
                             label="Download Merged Zip File",
